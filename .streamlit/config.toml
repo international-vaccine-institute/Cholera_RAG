@@ -1,0 +1,4 @@
+[server]
+# Prevent Streamlit from aggressively introspecting large lazy-loaded modules
+# (e.g., transformers image processors that require optional torchvision).
+fileWatcherType = "none"

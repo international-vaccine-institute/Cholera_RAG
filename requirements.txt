@@ -1,0 +1,15 @@
+﻿langchain
+langchain-chroma
+langchain-community
+langchain-huggingface
+langchain-cohere
+langchain-google-genai
+langchain-openai
+langchain-text-splitters
+pypdf
+faiss-cpu
+rank_bm25
+flashrank
+sentence-transformers
+python-dotenv
+streamlit
