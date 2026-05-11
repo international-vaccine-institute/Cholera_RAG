@@ -88,16 +88,13 @@ def _score_context_document(doc: Document, question: str) -> int:
     q = question.lower()
     score = 0
 
-    # Prefer chunks that explicitly match key terms in table-like questions.
     for keyword in ("age", "age group", "coverage", "campaign", "shashemene", "%", "table"):
         if keyword in q and keyword in text:
             score += 2
 
-    # Boost table/numeric structure cues.
     if any(marker in text for marker in ("table", "%", "total", "male", "female", "age group")):
         score += 2
 
-    # Help capture known source files like source #4 (e.g., 4_xxx.pdf).
     if re.search(r"(^|[^0-9])4([^0-9]|$)", filename):
         score += 1
     if "shashemene" in q and "shashemene" in text:
@@ -260,10 +257,7 @@ def _resolve_citations(answer: str, doc_map: dict[int, tuple[str, str]]) -> str:
             return f"[Source: {filename}, p.{page}]"
         return match.group(0)
 
-    # Replace [Doc N] tags produced by the model.
-    answer = re.sub(r"\[Doc\s*(\d+)\]", _replace, answer)
-    # Also handle any residual [Source: ...] the model may have written literally.
-    return answer
+    return re.sub(r"\[Doc\s*(\d+)\]", _replace, answer)
 
 
 def generate_answer(
@@ -282,7 +276,6 @@ def generate_answer(
         chain = build_gemini_chain(model_name=model_name)
         response = chain.invoke({"question": question, "context": context})
         raw = response.content if hasattr(response, "content") else response
-        # Gemini may return a list of content parts — flatten to plain string.
         if isinstance(raw, list):
             answer = " ".join(
                 part.get("text", "") if isinstance(part, dict) else str(part)
@@ -300,7 +293,6 @@ def generate_answer(
     answer = _resolve_citations(answer, doc_map)
 
     if "[Source:" not in answer:
-        # Fallback: model omitted citations entirely — append from first doc.
         first = retrieved_docs[0]
         filename = first.metadata.get("filename", "unknown")
         page = str(first.metadata.get("page_number", first.metadata.get("page", "N/A")))

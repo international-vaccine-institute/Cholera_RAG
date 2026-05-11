@@ -10,7 +10,7 @@ pinned: false
 
 # Ethiopia Cholera Response RAG System
 
-A RAG system built to answer questions about cholera in Ethiopia using 10 research papers and clinical guidelines as the knowledge base. You ask a question, it finds the relevant passages, and Llama 3.3 70B (via Groq) writes the answer — always with citations pinned to the exact source file and page number.
+A RAG system built to answer questions about cholera in Ethiopia using 10 research papers and clinical guidelines as the knowledge base. You ask a question, it finds the relevant passages, and Gemini 3.1 Flash-Lite writes the answer — always with citations pinned to the exact source file and page number.
 
 ---
 
@@ -21,9 +21,9 @@ cholera-rag-system/
 ├── app.py              # Streamlit UI
 ├── main.py             # CLI version if you prefer the terminal
 ├── src/
-│   ├── ingestion.py    # PDF loading (pdfplumber), chunking, index building
+│   ├── ingestion.py    # PDF loading (PyMuPDF + pdfplumber), chunking, index building
 │   ├── retriever.py    # hybrid BM25 + vector search + FlashRank reranking
-│   └── generator.py    # prompt engineering, Groq/Gemini call, citation resolution
+│   └── generator.py    # prompt engineering, Gemini/Groq call, citation resolution
 ├── data/               # the 10 PDF source papers
 ├── vector_db/          # saved Chroma index + BM25 document store
 └── requirements.txt
@@ -35,8 +35,8 @@ The ingestion / retrieval / generation split is intentional — each piece can b
 
 ## Setup
 
-You'll need Python 3.10+ and a **Groq API key** (free at [console.groq.com](https://console.groq.com)).
-A Gemini API key works too — the system falls back to Gemini if no Groq key is found.
+You'll need Python 3.10+ and a **Gemini API key** (free at [aistudio.google.com](https://aistudio.google.com/apikey)).
+A Groq API key works as fallback — the system uses Groq if no Gemini key is found.
 
 ```bash
 pip install -r requirements.txt
@@ -45,8 +45,8 @@ pip install -r requirements.txt
 Copy `.env.example` to `.env` and fill in your key:
 
 ```
-GROQ_API_KEY=your_groq_key_here        # recommended (500 req/day free)
-GEMINI_API_KEY=your_gemini_key_here    # optional fallback (20 req/day free)
+GEMINI_API_KEY=your_gemini_key_here    # primary (pay-as-you-go, ~$0.30/1M input tokens)
+GROQ_API_KEY=your_groq_key_here        # fallback (1,000 req/day free)
 HF_TOKEN=optional_for_gated_hf_models
 ```
 
@@ -69,11 +69,11 @@ The papers have a mix of narrative paragraphs and dense tables, so the chunk siz
 
 The 200-character overlap is mostly to avoid the edge case where a sentence gets split right at a chunk boundary, so nothing falls through the cracks between chunks.
 
-### Why pdfplumber for PDF parsing?
+### Why PyMuPDF + pdfplumber for PDF parsing?
 
-The source documents are epidemiology papers and clinical guidelines with a lot of tables. The standard `PyPDFLoader` just dumps all text in reading order, which often scrambles table columns — you end up with numbers that are impossible to match back to their row and column headers.
+The source documents are a mix of single-column reports and multi-column academic papers. `pdfplumber` alone handles single-column layouts well but collapses word spaces in two-column PDFs — words like "introduced at least 11 times since 1970" get extracted as "introducedatleast11timessince1970", which breaks both BM25 and vector search entirely.
 
-`pdfplumber` extracts table regions separately, formats each row as pipe-delimited text (`Region | Cases | Deaths | CFR`), and keeps body text and table text from overlapping. It's not perfect — tables that span pages still get split — but the column alignment is far more reliable.
+PyMuPDF resolves this: it uses character-level coordinates to reconstruct word boundaries correctly, regardless of column layout. So the pipeline now uses PyMuPDF for body text extraction (accurate spacing), then pdfplumber on top to detect and format tables as pipe-delimited rows (`Region | Cases | Deaths | CFR`). Tables that span pages still get split at the page boundary, but column alignment within a page is reliable.
 
 ### Why `all-MiniLM-L6-v2` for embeddings?
 
@@ -81,17 +81,19 @@ Practical reasons mainly: it's 80MB, runs on CPU without issues, and indexes all
 
 It's not the most powerful embedding model — a biomedical-focused model would probably do better on specialized terminology. But for matching the general intent of a question to the right passages, it's good enough that the reranker handles the fine-grained sorting.
 
+The current index holds ~835 chunks across 10 documents.
+
 ### Why hybrid retrieval + FlashRank reranking?
 
 BM25 alone misses questions where the wording doesn't exactly match the document (e.g., "death rate" vs. "case fatality ratio"). Vector search alone misses exact terms — region names like Oromia or Shashemene, acronyms like OCV or AWD, specific numeric values. Running both and combining the results catches what either one would miss on its own.
 
 The FlashRank cross-encoder (`ms-marco-MiniLM-L-12-v2`) then re-scores the top 15 candidates by reading the query and each passage together, which is much more accurate than the initial retrieval scores. We upgraded from `TinyBERT-L-2` (2 layers) to `MiniLM-L-12` (12 layers) for meaningfully better reranking quality with acceptable latency.
 
-### Why Groq + Llama 3.3 70B?
+### Why Gemini 3.1 Flash-Lite as the primary LLM?
 
-Groq's free tier gives 500 requests/day, which is 25x more than Gemini's free tier (20/day). With multi-turn query rewriting adding an extra LLM call per conversation turn, the higher quota matters. Llama 3.3 70B also follows the citation format instructions reliably and doesn't hallucinate source filenames when given clear constraints.
+Input tokens are the bottleneck for RAG workloads — each query sends 5–7 retrieved chunks (typically 3,000–6,000 tokens) to the model. Gemini 3.1 Flash-Lite costs $0.25/1M input tokens, which is roughly half the cost of Groq's Llama 3.3 70B ($0.59/1M). For a system where 90% of token spend is on input, that difference adds up quickly.
 
-The system falls back to Gemini 2.5 Flash automatically if `GROQ_API_KEY` isn't set.
+Groq (Llama 3.3 70B) is kept as an automatic fallback when no Gemini key is configured. Its lower output token price ($0.79/1M vs $1.50/1M) makes it preferable for queries that generate long answers.
 
 ### How citations work
 
