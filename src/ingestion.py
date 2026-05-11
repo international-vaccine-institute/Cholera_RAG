@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
+import fitz  # PyMuPDF
 import pdfplumber
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -37,7 +38,12 @@ def _format_table(table: list[list[str | None]]) -> str:
 
 
 def load_pdf_documents(data_dir: Path | str = DEFAULT_DATA_DIR) -> list[Document]:
-    """Load all PDFs from ``data_dir`` using pdfplumber for accurate table extraction."""
+    """Load all PDFs from ``data_dir``.
+
+    Body text is extracted with PyMuPDF, which handles multi-column layouts and
+    correctly inserts word-level whitespace. Table structure is preserved using
+    pdfplumber and appended as pipe-delimited blocks.
+    """
     data_path = Path(data_dir)
     pdf_paths = sorted(data_path.glob("*.pdf"))
 
@@ -46,31 +52,28 @@ def load_pdf_documents(data_dir: Path | str = DEFAULT_DATA_DIR) -> list[Document
 
     documents: list[Document] = []
     for pdf_path in pdf_paths:
-        with pdfplumber.open(str(pdf_path)) as pdf:
-            for page_index, page in enumerate(pdf.pages):
+        # --- body text via PyMuPDF ---
+        mupdf_doc = fitz.open(str(pdf_path))
+        mupdf_pages: list[str] = []
+        for page in mupdf_doc:
+            mupdf_pages.append(page.get_text("text") or "")
+        mupdf_doc.close()
+
+        # --- table structure via pdfplumber ---
+        with pdfplumber.open(str(pdf_path)) as plumber_pdf:
+            for page_index, plumber_page in enumerate(plumber_pdf.pages):
                 page_number = page_index + 1
+                body_text = mupdf_pages[page_index].strip() if page_index < len(mupdf_pages) else ""
 
-                # Extract text outside table bounding boxes to avoid duplication.
-                table_bboxes = [t.bbox for t in page.find_tables()]
-                if table_bboxes:
-                    filtered = page.filter(
-                        lambda obj, bboxes=table_bboxes: not any(
-                            bbox[0] <= obj.get("x0", 0) <= bbox[2]
-                            and bbox[1] <= obj.get("top", 0) <= bbox[3]
-                            for bbox in bboxes
-                        )
-                    )
-                    body_text = filtered.extract_text() or ""
-                else:
-                    body_text = page.extract_text() or ""
-
-                # Extract tables with structure preserved.
                 table_sections: list[str] = []
-                for table in page.extract_tables():
-                    if table:
-                        table_sections.append(_format_table(table))
+                try:
+                    for table in plumber_page.extract_tables():
+                        if table:
+                            table_sections.append(_format_table(table))
+                except Exception:
+                    pass
 
-                full_text = body_text.strip()
+                full_text = body_text
                 if table_sections:
                     full_text += "\n\n[TABLE]\n" + "\n\n[TABLE]\n".join(table_sections)
 

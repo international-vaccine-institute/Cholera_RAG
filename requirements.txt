@@ -8,6 +8,7 @@ langchain-groq
 langchain-openai
 langchain-text-splitters
 pypdf
+pymupdf
 pdfplumber
 faiss-cpu
 rank_bm25
