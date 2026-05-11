@@ -117,6 +117,8 @@ def _init_session_state() -> None:
         st.session_state.messages = []
     if "pending_question" not in st.session_state:
         st.session_state.pending_question = None
+    if "used_examples" not in st.session_state:
+        st.session_state.used_examples = set()
 
 
 def _doc_to_fragment(doc: Any) -> dict[str, str]:
@@ -275,6 +277,19 @@ def main() -> None:
         st.error(f"Failed to load cached resources: {exc}")
         st.stop()
 
+    remaining_examples = [q for q in EXAMPLE_QUESTIONS if q not in st.session_state.used_examples]
+    if remaining_examples:
+        st.markdown(
+            '<p style="color:#5a7a9a; font-size:0.85em; margin-bottom:6px;">💡 Example questions — click to ask:</p>',
+            unsafe_allow_html=True,
+        )
+        for q in remaining_examples:
+            if st.button(q, key=f"eq_{q[:30]}", use_container_width=True):
+                st.session_state.pending_question = q
+                st.session_state.used_examples.add(q)
+                st.rerun()
+        st.divider()
+
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             if message["role"] == "assistant":
@@ -284,17 +299,6 @@ def main() -> None:
             if message["role"] == "assistant" and message.get("fragments"):
                 _render_fragments(message["fragments"])
 
-    if not st.session_state.messages:
-        st.markdown(
-            '<p style="color:#5a7a9a; font-size:0.85em; margin-bottom:8px;">💡 Example questions — click to ask:</p>',
-            unsafe_allow_html=True,
-        )
-        cols = st.columns(1)
-        for q in EXAMPLE_QUESTIONS:
-            if st.button(q, key=f"eq_{q[:30]}", use_container_width=True):
-                st.session_state.pending_question = q
-                st.rerun()
-
     user_question = st.chat_input("Ask about cholera prevention, outbreaks, or response strategy...")
 
     if st.session_state.pending_question:
@@ -303,6 +307,8 @@ def main() -> None:
 
     if not user_question:
         return
+
+    st.session_state.used_examples.add(user_question)
 
     st.session_state.messages.append({"role": "user", "content": user_question})
     with st.chat_message("user"):
