@@ -103,9 +103,20 @@ def load_resources() -> dict[str, Any]:
     }
 
 
+EXAMPLE_QUESTIONS = [
+    "What is the case fatality rate (CFR) for cholera in Ethiopia reported in the retrospective analysis?",
+    "According to the genomic analysis, how many times has the seventh pandemic lineage been introduced into Africa since 1970, and from which region?",
+    "What were the two-dose OCV coverage rates by age group in the Shashemene vaccination campaign?",
+    "According to the Ethiopia National Cholera Elimination Plan 2022–2028, what is the total budget and how is it allocated across intervention areas?",
+    "What are the recommended rehydration protocols for severe cholera dehydration according to the management guidelines?",
+]
+
+
 def _init_session_state() -> None:
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    if "pending_question" not in st.session_state:
+        st.session_state.pending_question = None
 
 
 def _doc_to_fragment(doc: Any) -> dict[str, str]:
@@ -273,7 +284,23 @@ def main() -> None:
             if message["role"] == "assistant" and message.get("fragments"):
                 _render_fragments(message["fragments"])
 
+    if not st.session_state.messages:
+        st.markdown(
+            '<p style="color:#5a7a9a; font-size:0.85em; margin-bottom:8px;">💡 Example questions — click to ask:</p>',
+            unsafe_allow_html=True,
+        )
+        cols = st.columns(1)
+        for q in EXAMPLE_QUESTIONS:
+            if st.button(q, key=f"eq_{q[:30]}", use_container_width=True):
+                st.session_state.pending_question = q
+                st.rerun()
+
     user_question = st.chat_input("Ask about cholera prevention, outbreaks, or response strategy...")
+
+    if st.session_state.pending_question:
+        user_question = st.session_state.pending_question
+        st.session_state.pending_question = None
+
     if not user_question:
         return
 
