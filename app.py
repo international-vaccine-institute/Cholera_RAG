@@ -124,6 +124,7 @@ def _render_answer(text: str, docs: list[Any] | None = None) -> None:
     """
     strip_pattern = re.compile(r'\[Source:[^\]]+\]')
     body = strip_pattern.sub("", text).strip()
+    body = body.replace("$", r"\$")
     st.markdown(body)
 
     # Build source map: filename → sorted unique pages.

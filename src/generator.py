@@ -36,7 +36,7 @@ Follow these rules strictly:
    - which column label defines the metric (e.g., CFR vs cases),
    - whether the value is overall population or subgroup-specific.
 8) If table structure is ambiguous or headers are incomplete in the retrieved chunk, do not guess. State uncertainty and cite the source.
-9) 데이터가 표(Table) 형태나 수치 나열 형태로 존재할 가능성이 높으니, 문장뿐만 아니라 데이터가 나열된 섹션을 꼼꼼히 분석하여 답변하라.
+9) The answer may require data from tables or sections listing numerical values. Carefully analyze not only narrative sentences but also any structured data sections before responding.
 """.strip()
 
 
