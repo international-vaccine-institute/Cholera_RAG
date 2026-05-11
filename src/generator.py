@@ -226,8 +226,15 @@ def rewrite_query(
         )
         chain = prompt | llm
         response = chain.invoke({"history": history_text, "question": question})
-        rewritten = response.content if hasattr(response, "content") else str(response)
-        return rewritten.strip() or question
+        raw = response.content if hasattr(response, "content") else response
+        if isinstance(raw, list):
+            rewritten = " ".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in raw
+            ).strip()
+        else:
+            rewritten = str(raw).strip()
+        return rewritten or question
     except Exception:
         return question
 
@@ -274,7 +281,15 @@ def generate_answer(
     try:
         chain = build_gemini_chain(model_name=model_name)
         response = chain.invoke({"question": question, "context": context})
-        answer = response.content if hasattr(response, "content") else str(response)
+        raw = response.content if hasattr(response, "content") else response
+        # Gemini may return a list of content parts — flatten to plain string.
+        if isinstance(raw, list):
+            answer = " ".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in raw
+            ).strip()
+        else:
+            answer = str(raw).strip()
     except Exception:
         answer = invoke_with_google_genai_sdk(
             question=question,
