@@ -31,9 +31,9 @@ load_dotenv()
 
 def _api_key_available() -> bool:
     return bool(
-        os.getenv("GROQ_API_KEY")
-        or os.getenv("GEMINI_API_KEY")
+        os.getenv("GEMINI_API_KEY")
         or os.getenv("GOOGLE_API_KEY")
+        or os.getenv("GROQ_API_KEY")
     )
 
 
@@ -248,7 +248,10 @@ def main() -> None:
     status = get_system_status()
 
     if not _api_key_available():
-        st.error("API key is missing. Set GROQ_API_KEY (recommended) or GEMINI_API_KEY in .env.")
+        st.error(
+            "API key is missing. Set GEMINI_API_KEY (or GOOGLE_API_KEY) in .env. "
+            "GROQ_API_KEY can be used as fallback."
+        )
         st.stop()
 
     if not (status["vector_ready"] and status["bm25_ready"]):

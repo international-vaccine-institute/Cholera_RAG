@@ -1,4 +1,4 @@
-"""Answer generation module using Gemini 2.5 Flash."""
+"""Answer generation module using Gemini 3.1 Flash-Lite."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-DEFAULT_GEMINI_MODEL = "models/gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 load_dotenv()
@@ -51,24 +51,33 @@ def get_gemini_api_key() -> str:
 
 
 def build_llm(temperature: float = 0.0):
-    """Return the best available LLM: Groq if configured, otherwise Gemini.
+    """Return the best available LLM: Gemini first, then Groq fallback.
 
-    Priority: GROQ_API_KEY → GEMINI_API_KEY / GOOGLE_API_KEY
+    Priority: GEMINI_API_KEY / GOOGLE_API_KEY → GROQ_API_KEY
     seed=42 is set for Groq to maximise reproducibility across identical queries.
     """
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if gemini_key:
+        return ChatGoogleGenerativeAI(
+            model=DEFAULT_GEMINI_MODEL,
+            google_api_key=gemini_key,
+            temperature=temperature,
+        )
+
     groq_key = os.getenv("GROQ_API_KEY")
     if groq_key:
         from langchain_groq import ChatGroq
+
         return ChatGroq(
             model=DEFAULT_GROQ_MODEL,
             api_key=groq_key,
             temperature=temperature,
             seed=42,
         )
-    return ChatGoogleGenerativeAI(
-        model=DEFAULT_GEMINI_MODEL,
-        google_api_key=get_gemini_api_key(),
-        temperature=temperature,
+
+    raise ValueError(
+        "No LLM API key found. Set GEMINI_API_KEY (or GOOGLE_API_KEY), "
+        "or set GROQ_API_KEY as fallback."
     )
 
 
