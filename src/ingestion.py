@@ -10,8 +10,8 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
+import pdfplumber
 from langchain_chroma import Chroma
-from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -27,8 +27,17 @@ CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 
 
+def _format_table(table: list[list[str | None]]) -> str:
+    """Format a pdfplumber table as a pipe-delimited string preserving row/column structure."""
+    rows: list[str] = []
+    for row in table:
+        cells = [str(cell).strip() if cell is not None else "" for cell in row]
+        rows.append(" | ".join(cells))
+    return "\n".join(rows)
+
+
 def load_pdf_documents(data_dir: Path | str = DEFAULT_DATA_DIR) -> list[Document]:
-    """Load all PDFs from ``data_dir`` and normalize source metadata."""
+    """Load all PDFs from ``data_dir`` using pdfplumber for accurate table extraction."""
     data_path = Path(data_dir)
     pdf_paths = sorted(data_path.glob("*.pdf"))
 
@@ -37,21 +46,47 @@ def load_pdf_documents(data_dir: Path | str = DEFAULT_DATA_DIR) -> list[Document
 
     documents: list[Document] = []
     for pdf_path in pdf_paths:
-        loader = PyPDFLoader(str(pdf_path))
-        pages = loader.load()
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for page_index, page in enumerate(pdf.pages):
+                page_number = page_index + 1
 
-        for page_index, page in enumerate(pages):
-            raw_page = page.metadata.get("page", page_index)
-            page_number = int(raw_page) + 1 if isinstance(raw_page, int) else page_index + 1
+                # Extract text outside table bounding boxes to avoid duplication.
+                table_bboxes = [t.bbox for t in page.find_tables()]
+                if table_bboxes:
+                    filtered = page.filter(
+                        lambda obj, bboxes=table_bboxes: not any(
+                            bbox[0] <= obj.get("x0", 0) <= bbox[2]
+                            and bbox[1] <= obj.get("top", 0) <= bbox[3]
+                            for bbox in bboxes
+                        )
+                    )
+                    body_text = filtered.extract_text() or ""
+                else:
+                    body_text = page.extract_text() or ""
 
-            page.metadata.update(
-                {
-                    "filename": pdf_path.name,
-                    "page_number": page_number,
-                    "source_path": str(pdf_path),
-                }
-            )
-            documents.append(page)
+                # Extract tables with structure preserved.
+                table_sections: list[str] = []
+                for table in page.extract_tables():
+                    if table:
+                        table_sections.append(_format_table(table))
+
+                full_text = body_text.strip()
+                if table_sections:
+                    full_text += "\n\n[TABLE]\n" + "\n\n[TABLE]\n".join(table_sections)
+
+                if not full_text.strip():
+                    continue
+
+                documents.append(
+                    Document(
+                        page_content=full_text,
+                        metadata={
+                            "filename": pdf_path.name,
+                            "page_number": page_number,
+                            "source_path": str(pdf_path),
+                        },
+                    )
+                )
 
     return documents
 

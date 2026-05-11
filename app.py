@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
 from dotenv import load_dotenv
 
-from src.generator import generate_answer
+from src.generator import generate_answer, rewrite_query
 from src.ingestion import (
     DEFAULT_BM25_DOCUMENTS_PATH,
     DEFAULT_DATA_DIR,
@@ -29,11 +30,22 @@ load_dotenv()
 
 
 def _api_key_available() -> bool:
-    return bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+    return bool(
+        os.getenv("GROQ_API_KEY")
+        or os.getenv("GEMINI_API_KEY")
+        or os.getenv("GOOGLE_API_KEY")
+    )
 
 
 def _list_reference_documents(data_dir: Path = DEFAULT_DATA_DIR) -> list[str]:
-    return sorted(path.name for path in data_dir.glob("*.pdf"))
+    def _numeric_prefix(name: str) -> int:
+        m = re.match(r"^(\d+)", name)
+        return int(m.group(1)) if m else 999
+
+    return sorted(
+        (path.name for path in data_dir.glob("*.pdf")),
+        key=_numeric_prefix,
+    )
 
 
 def _prepare_indexes() -> dict[str, bool]:
@@ -103,6 +115,61 @@ def _doc_to_fragment(doc: Any) -> dict[str, str]:
     return {"filename": filename, "page": page, "content": content}
 
 
+def _render_answer(text: str, docs: list[Any] | None = None) -> None:
+    """Render answer body and deduplicated citation badges.
+
+    If ``docs`` is provided, the SOURCES section is built directly from the
+    retrieved document metadata so it is always consistent regardless of which
+    [Doc N] tags the LLM chose to emit.
+    """
+    strip_pattern = re.compile(r'\[Source:[^\]]+\]')
+    body = strip_pattern.sub("", text).strip()
+    st.markdown(body)
+
+    # Build source map: filename → sorted unique pages.
+    seen: dict[str, list[str]] = {}
+
+    if docs:
+        for doc in docs:
+            filename = str(doc.metadata.get("filename", "unknown"))
+            page = str(doc.metadata.get("page_number", doc.metadata.get("page", "N/A")))
+            if filename not in seen:
+                seen[filename] = []
+            if page not in seen[filename]:
+                seen[filename].append(page)
+    else:
+        citation_pattern = re.compile(r'\[Source:\s*(.*?),\s*p\.([\w/]+)\]')
+        for filename, page in citation_pattern.findall(text):
+            filename = filename.strip()
+            page = page.strip()
+            if filename not in seen:
+                seen[filename] = []
+            if page not in seen[filename]:
+                seen[filename].append(page)
+
+    if seen:
+        badges = ""
+        for filename, pages in seen.items():
+            page_label = "pp." + ", ".join(pages) if len(pages) > 1 else "p." + pages[0]
+            badges += (
+                f'<span style="display:inline-block; background:#1a3a5c; color:#89c4f4; '
+                f'padding:3px 10px; border-radius:12px; font-size:0.78em; '
+                f'border:1px solid #2d5a8e; margin:2px 4px 2px 0;">'
+                f'📄 {filename}, {page_label}</span>'
+            )
+        st.markdown(
+            f'<div style="margin-top:16px; padding:10px 14px; '
+            f'border-top:1px solid #2d3a4a; border-radius:0 0 8px 8px; '
+            f'background:#0f1e2e;">'
+            f'<span style="font-size:0.75em; color:#5a7a9a; '
+            f'letter-spacing:0.05em; text-transform:uppercase; font-weight:600;">'
+            f'Sources</span>'
+            f'<div style="margin-top:6px;">{badges}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+
 def _render_fragments(fragments: list[dict[str, str]]) -> None:
     with st.expander("Context Fragments", expanded=False):
         for idx, fragment in enumerate(fragments, start=1):
@@ -148,8 +215,18 @@ def _render_sidebar() -> tuple[float, bool]:
     )
     if use_reranker:
         st.sidebar.caption("Enabled: FlashRank lightweight model (top 10 candidates)")
+        relevance_threshold = st.sidebar.slider(
+            "Relevance Threshold",
+            min_value=0.0,
+            max_value=0.5,
+            value=0.05,
+            step=0.01,
+            help="Chunks scoring below this threshold are excluded before generation. "
+                 "Raise it to be stricter; lower it to allow more context.",
+        )
     else:
         st.sidebar.caption("Disabled: faster retrieval-only mode")
+        relevance_threshold = 0.0
 
     st.sidebar.header("Reference Documents")
     if references:
@@ -158,7 +235,7 @@ def _render_sidebar() -> tuple[float, bool]:
     else:
         st.sidebar.warning("No PDF files found in data/.")
 
-    return alpha, use_reranker
+    return alpha, use_reranker, relevance_threshold
 
 
 def main() -> None:
@@ -166,11 +243,11 @@ def main() -> None:
     st.title("Ethiopia Cholera Response RAG System")
 
     _init_session_state()
-    alpha, use_reranker = _render_sidebar()
+    alpha, use_reranker, relevance_threshold = _render_sidebar()
     status = get_system_status()
 
     if not _api_key_available():
-        st.error("Gemini API key is missing. Set GEMINI_API_KEY or GOOGLE_API_KEY in .env.")
+        st.error("API key is missing. Set GROQ_API_KEY (recommended) or GEMINI_API_KEY in .env.")
         st.stop()
 
     if not (status["vector_ready"] and status["bm25_ready"]):
@@ -185,7 +262,10 @@ def main() -> None:
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            if message["role"] == "assistant":
+                _render_answer(message["content"], docs=message.get("docs"))
+            else:
+                st.markdown(message["content"])
             if message["role"] == "assistant" and message.get("fragments"):
                 _render_fragments(message["fragments"])
 
@@ -199,6 +279,12 @@ def main() -> None:
 
     with st.chat_message("assistant"):
         with st.spinner("Searching documents..."):
+            # Rewrite follow-up questions using conversation history.
+            prior_history = st.session_state.messages[:-1]  # exclude the just-added user message
+            search_query = rewrite_query(user_question, prior_history) if prior_history else user_question
+            if search_query != user_question:
+                st.caption(f"🔍 Search query: *{search_query}*")
+
             try:
                 ensemble = build_ensemble_retriever(
                     chroma_retriever=resources["chroma_retriever"],
@@ -213,7 +299,15 @@ def main() -> None:
                     top_n=7,
                     preloaded_compressor=resources["cross_encoder"] if use_reranker else None,
                 )
-                docs = retriever.invoke(user_question)[:7]
+                docs = retriever.invoke(search_query)[:7]
+
+                # Filter out low-relevance chunks when reranker is active.
+                if use_reranker and relevance_threshold > 0.0:
+                    filtered = [
+                        d for d in docs
+                        if d.metadata.get("relevance_score", 1.0) >= relevance_threshold
+                    ]
+                    docs = filtered if filtered else docs[:1]
             except Exception as exc:
                 st.error(f"Retrieval failed: {exc}")
                 return
@@ -236,11 +330,11 @@ def main() -> None:
                 return
 
         fragments = [_doc_to_fragment(doc) for doc in docs]
-        st.markdown(answer)
+        _render_answer(answer, docs=docs)
         _render_fragments(fragments)
 
     st.session_state.messages.append(
-        {"role": "assistant", "content": answer, "fragments": fragments}
+        {"role": "assistant", "content": answer, "fragments": fragments, "docs": docs}
     )
 
 

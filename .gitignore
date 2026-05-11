@@ -22,11 +22,8 @@ venv/
 # Streamlit
 .streamlit/secrets.toml
 
-# Vector DB and generated indices
-vector_db/
-
-# Local data files (large/proprietary PDFs)
-data/*.pdf
+# Local caches (FlashRank 모델은 HF Spaces에서 자동 재다운로드)
+# vector_db/ 와 data/*.pdf 는 HF Spaces 배포를 위해 git에 포함
 
 # OS / editor
 .DS_Store

@@ -12,6 +12,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 DEFAULT_GEMINI_MODEL = "models/gemini-2.5-flash"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 load_dotenv()
 
@@ -22,15 +23,20 @@ Follow these rules strictly:
 1) Answer only based on the provided context.
 2) If the context does not contain enough evidence, say you do not know.
 3) Answer in English.
-4) At the end of your answer, always include citations in this format:
-   [Source: filename, p.page]
-5) Critical Instruction for Table Reading: When extracting numerical data from tables, you must strictly distinguish between 'Total' values and sub-category values (e.g., Sex, Age group, Region). Always double-check the row and column headers to ensure the cited value represents the entire population unless specified otherwise.
-6) For any numeric answer from a table, validate all of the following before answering:
+4) At the end of your answer, cite the documents you used with ONLY their document numbers as shown
+   in the context headers (e.g., [Doc 1], [Doc 3]). Do NOT write filenames or page numbers yourself —
+   they will be filled in automatically. Use only the [Doc N] tags that appear in the context.
+5) Always include specific numerical values (percentages, counts, rates, etc.) when they are present
+   in the context. Never substitute a vague description (e.g., "high coverage") for an actual number
+   that exists in the retrieved text. If multiple figures are available (e.g., by subgroup, region,
+   or round), list them all explicitly.
+6) Critical Instruction for Table Reading: When extracting numerical data from tables, you must strictly distinguish between 'Total' values and sub-category values (e.g., Sex, Age group, Region). Always double-check the row and column headers to ensure the cited value represents the entire population unless specified otherwise.
+7) For any numeric answer from a table, validate all of the following before answering:
    - which row label the value belongs to (e.g., Total vs Male),
    - which column label defines the metric (e.g., CFR vs cases),
    - whether the value is overall population or subgroup-specific.
-7) If table structure is ambiguous or headers are incomplete in the retrieved chunk, do not guess. State uncertainty and cite the source.
-8) 데이터가 표(Table) 형태나 수치 나열 형태로 존재할 가능성이 높으니, 문장뿐만 아니라 데이터가 나열된 섹션을 꼼꼼히 분석하여 답변하라.
+8) If table structure is ambiguous or headers are incomplete in the retrieved chunk, do not guess. State uncertainty and cite the source.
+9) 데이터가 표(Table) 형태나 수치 나열 형태로 존재할 가능성이 높으니, 문장뿐만 아니라 데이터가 나열된 섹션을 꼼꼼히 분석하여 답변하라.
 """.strip()
 
 
@@ -42,6 +48,28 @@ def get_gemini_api_key() -> str:
             "Gemini API key is missing. Set GEMINI_API_KEY (or GOOGLE_API_KEY) in your environment."
         )
     return api_key
+
+
+def build_llm(temperature: float = 0.0):
+    """Return the best available LLM: Groq if configured, otherwise Gemini.
+
+    Priority: GROQ_API_KEY → GEMINI_API_KEY / GOOGLE_API_KEY
+    seed=42 is set for Groq to maximise reproducibility across identical queries.
+    """
+    groq_key = os.getenv("GROQ_API_KEY")
+    if groq_key:
+        from langchain_groq import ChatGroq
+        return ChatGroq(
+            model=DEFAULT_GROQ_MODEL,
+            api_key=groq_key,
+            temperature=temperature,
+            seed=42,
+        )
+    return ChatGoogleGenerativeAI(
+        model=DEFAULT_GEMINI_MODEL,
+        google_api_key=get_gemini_api_key(),
+        temperature=temperature,
+    )
 
 
 def _score_context_document(doc: Document, question: str) -> int:
@@ -86,13 +114,8 @@ def format_context(documents: Iterable[Document], question: str) -> str:
 
 
 def build_gemini_chain(model_name: str = DEFAULT_GEMINI_MODEL):
-    """Create Gemini chat chain with a strict RAG prompt."""
-    api_key = get_gemini_api_key()
-    llm = ChatGoogleGenerativeAI(
-        model=model_name,
-        google_api_key=api_key,
-        temperature=0.2,
-    )
+    """Create LLM chat chain with a strict RAG prompt (Groq or Gemini)."""
+    llm = build_llm(temperature=0.0)
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system", SYSTEM_PROMPT),
@@ -101,7 +124,7 @@ def build_gemini_chain(model_name: str = DEFAULT_GEMINI_MODEL):
                 "Question:\n{question}\n\n"
                 "Context:\n{context}\n\n"
                 "Please provide a concise and accurate answer in English.\n"
-                "If your answer includes numbers from a table, briefly state how you verified row/column alignment.",
+                "At the end, cite only using [Doc N] tags (e.g., [Doc 1][Doc 2]). Do not write filenames.",
             ),
         ]
     )
@@ -123,13 +146,108 @@ def invoke_with_google_genai_sdk(
         f"Question:\n{question}\n\n"
         f"Context:\n{context}\n\n"
         "Please provide a concise and accurate answer in English.\n"
-        "If your answer includes numbers from a table, briefly state how you verified row/column alignment."
+        "At the end, cite only using [Doc N] tags (e.g., [Doc 1][Doc 2]). Do not write filenames."
     )
     response = client.models.generate_content(
         model=model_name,
         contents=composed_prompt,
     )
     return (response.text or "").strip()
+
+
+_FOLLOWUP_SIGNALS = re.compile(
+    r"\b(it|its|they|their|them|that|this|those|these|there|"
+    r"the same|the campaign|the region|the study|the paper|"
+    r"the result|the data|the rate|the number|such|aforementioned)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_followup(question: str) -> bool:
+    """Cheap heuristic: return True if the question likely needs prior context."""
+    q = question.strip()
+    if len(q) < 60:
+        return True
+    if _FOLLOWUP_SIGNALS.search(q):
+        return True
+    return False
+
+
+def rewrite_query(
+    question: str,
+    conversation_history: list[dict[str, str]],
+    model_name: str = DEFAULT_GEMINI_MODEL,
+) -> str:
+    """Rewrite a follow-up question as a standalone search query using conversation context.
+
+    Returns the original question unchanged when there is no prior history,
+    when the question looks self-contained, or when the rewrite call fails.
+    """
+    if not conversation_history:
+        return question
+
+    if not _looks_like_followup(question):
+        return question
+
+    history_lines: list[str] = []
+    for msg in conversation_history[-6:]:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        snippet = msg["content"][:400].replace("\n", " ")
+        history_lines.append(f"{role}: {snippet}")
+    history_text = "\n".join(history_lines)
+
+    try:
+        llm = build_llm(temperature=0.0)
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "You are a search query rewriter. "
+                    "Given a conversation history and a follow-up question, "
+                    "rewrite the follow-up question as a complete, self-contained search query "
+                    "that includes all necessary context from the conversation. "
+                    "If the follow-up question is already self-contained, return it as-is. "
+                    "Output only the rewritten query — no explanation, no quotes.",
+                ),
+                (
+                    "human",
+                    "Conversation history:\n{history}\n\nFollow-up question: {question}\n\nRewritten query:",
+                ),
+            ]
+        )
+        chain = prompt | llm
+        response = chain.invoke({"history": history_text, "question": question})
+        rewritten = response.content if hasattr(response, "content") else str(response)
+        return rewritten.strip() or question
+    except Exception:
+        return question
+
+
+def _build_doc_map(documents: list[Document], question: str) -> dict[int, tuple[str, str]]:
+    """Return {doc_index: (filename, page)} in the same order as format_context."""
+    doc_list = list(documents)
+    doc_list.sort(key=lambda d: _score_context_document(d, question), reverse=True)
+    result: dict[int, tuple[str, str]] = {}
+    for idx, doc in enumerate(doc_list, start=1):
+        filename = doc.metadata.get("filename", "unknown")
+        page = str(doc.metadata.get("page_number", doc.metadata.get("page", "N/A")))
+        result[idx] = (filename, page)
+    return result
+
+
+def _resolve_citations(answer: str, doc_map: dict[int, tuple[str, str]]) -> str:
+    """Replace [Doc N] tags with verified [Source: filename, p.page] citations."""
+    def _replace(match: re.Match) -> str:
+        n = int(match.group(1))
+        if n in doc_map:
+            filename, page = doc_map[n]
+            return f"[Source: {filename}, p.{page}]"
+        return match.group(0)
+
+    # Replace [Doc N] tags produced by the model.
+    answer = re.sub(r"\[Doc\s*(\d+)\]", _replace, answer)
+    # Also handle any residual [Source: ...] the model may have written literally.
+    return answer
 
 
 def generate_answer(
@@ -142,23 +260,26 @@ def generate_answer(
         return "No relevant context was retrieved. [Source: none]"
 
     context = format_context(retrieved_docs, question=question)
+    doc_map = _build_doc_map(retrieved_docs, question=question)
+
     try:
         chain = build_gemini_chain(model_name=model_name)
         response = chain.invoke({"question": question, "context": context})
         answer = response.content if hasattr(response, "content") else str(response)
     except Exception:
-        # Keep service usable when langchain-google-genai and google-genai versions diverge.
         answer = invoke_with_google_genai_sdk(
             question=question,
             context=context,
             model_name=model_name,
         )
 
+    answer = _resolve_citations(answer, doc_map)
+
     if "[Source:" not in answer:
-        # Fallback to keep output format stable even when the model omits citations.
+        # Fallback: model omitted citations entirely — append from first doc.
         first = retrieved_docs[0]
         filename = first.metadata.get("filename", "unknown")
-        page = first.metadata.get("page_number", first.metadata.get("page", "N/A"))
+        page = str(first.metadata.get("page_number", first.metadata.get("page", "N/A")))
         answer = f"{answer.strip()}\n\n[Source: {filename}, p.{page}]"
 
     return answer.strip()

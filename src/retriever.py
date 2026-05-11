@@ -37,7 +37,7 @@ except ImportError:
 RerankerProvider = Literal["flashrank", "cohere", "none"]
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FLASHRANK_CACHE_DIR = PROJECT_ROOT / ".cache" / "flashrank"
-DEFAULT_FLASHRANK_MODEL_NAME = "ms-marco-TinyBERT-L-2-v2"
+DEFAULT_FLASHRANK_MODEL_NAME = "ms-marco-MiniLM-L-12-v2"
 DEFAULT_RERANK_CANDIDATE_K = 15
 
 _RERANKER_CACHE: dict[tuple[str, int, str], object] = {}
