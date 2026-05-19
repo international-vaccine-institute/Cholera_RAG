@@ -134,37 +134,26 @@ def _doc_to_fragment(doc: Any) -> dict[str, str]:
 
 
 def _render_answer(text: str, docs: list[Any] | None = None) -> None:
-    """Render answer body and deduplicated citation badges.
+    """Render answer body and Sources badges.
 
-    If ``docs`` is provided, the SOURCES section is built directly from the
-    retrieved document metadata so it is always consistent regardless of which
-    [Doc N] tags the LLM chose to emit.
+    Sources are parsed from [Source: filename, p.X] tags in the answer text,
+    so only papers the LLM actually cited appear — not all retrieved documents.
     """
     strip_pattern = re.compile(r'\[Source:[^\]]+\]')
     body = strip_pattern.sub("", text).strip()
     body = body.replace("$", r"\$")
     st.markdown(body)
 
-    # Build source map: filename → sorted unique pages.
+    # Build source map from actual [Source: ...] citations in the answer text.
     seen: dict[str, list[str]] = {}
-
-    if docs:
-        for doc in docs:
-            filename = str(doc.metadata.get("filename", "unknown"))
-            page = str(doc.metadata.get("page_number", doc.metadata.get("page", "N/A")))
-            if filename not in seen:
-                seen[filename] = []
-            if page not in seen[filename]:
-                seen[filename].append(page)
-    else:
-        citation_pattern = re.compile(r'\[Source:\s*(.*?),\s*p\.([\w/]+)\]')
-        for filename, page in citation_pattern.findall(text):
-            filename = filename.strip()
-            page = page.strip()
-            if filename not in seen:
-                seen[filename] = []
-            if page not in seen[filename]:
-                seen[filename].append(page)
+    citation_pattern = re.compile(r'\[Source:\s*(.*?),\s*p\.([\w/]+)\]')
+    for filename, page in citation_pattern.findall(text):
+        filename = filename.strip()
+        page = page.strip()
+        if filename not in seen:
+            seen[filename] = []
+        if page not in seen[filename]:
+            seen[filename].append(page)
 
     if seen:
         badges = ""
