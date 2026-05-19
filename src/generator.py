@@ -90,36 +90,54 @@ def build_llm(temperature: float = 0.0):
 
 
 def _score_context_document(doc: Document, question: str) -> int:
-    """Score documents so table-like and query-matching chunks appear earlier."""
+    """Prioritise chunks that are most likely to contain the answer.
+
+    Two corpus-agnostic signals:
+    1. Structured-data boost: chunks containing tabular/numerical markers get a
+       bonus when the question is asking for a quantitative value.
+    2. Query-token overlap: long tokens (>=4 chars) shared between the question
+       and the chunk text are counted as a relevance signal.
+    """
     text = doc.page_content.lower()
-    filename = str(doc.metadata.get("filename", "")).lower()
     q = question.lower()
     score = 0
 
-    for keyword in ("age", "age group", "coverage", "campaign", "shashemene", "%", "table"):
-        if keyword in q and keyword in text:
-            score += 2
-
-    if any(marker in text for marker in ("table", "%", "total", "male", "female", "age group")):
-        score += 2
-
-    if re.search(r"(^|[^0-9])4([^0-9]|$)", filename):
-        score += 1
-    if "shashemene" in q and "shashemene" in text:
+    # Boost chunks that look like tables/numbers when the question asks for figures
+    numerical_question = any(
+        w in q for w in ("how many", "what is the", "rate", "percent",
+                         "number", "count", "total", "proportion", "ratio")
+    )
+    if numerical_question and any(m in text for m in ("[table]", "%", "total")):
         score += 3
+
+    # General token overlap (domain-agnostic)
+    q_tokens = set(re.findall(r"\b\w{4,}\b", q))
+    text_tokens = set(re.findall(r"\b\w{4,}\b", text))
+    score += len(q_tokens & text_tokens)
 
     return score
 
 
 def format_context(documents: Iterable[Document], question: str) -> str:
-    """Format retrieved chunks into a prompt-ready context block."""
+    """Format retrieved chunks into a prompt-ready context block.
+
+    Chunks from the same source file share the same [Doc N] label so the LLM
+    never confuses two chunks from one paper as being from different sources.
+    """
     doc_list = list(documents)
     doc_list.sort(key=lambda doc: _score_context_document(doc, question), reverse=True)
 
+    # Assign a stable doc number per unique filename
+    seen: dict[str, int] = {}
+    next_idx = 1
     sections: list[str] = []
-    for idx, doc in enumerate(doc_list, start=1):
+    for doc in doc_list:
         filename = doc.metadata.get("filename", "unknown")
         page = doc.metadata.get("page_number", doc.metadata.get("page", "N/A"))
+        if filename not in seen:
+            seen[filename] = next_idx
+            next_idx += 1
+        idx = seen[filename]
         sections.append(
             f"[Document {idx}] Filename: {filename} | Page: {page}\n"
             f"{doc.page_content.strip()}"

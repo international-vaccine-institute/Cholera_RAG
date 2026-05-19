@@ -19,12 +19,15 @@ from src.ingestion import (
 )
 from src.retriever import (
     DEFAULT_FLASHRANK_MODEL_NAME,
+    _looks_like_synthesis_query,
     build_ensemble_retriever,
     build_multi_query_retriever,
     build_rerank_retriever,
     get_flashrank_reranker,
+    get_per_document_chunks,
     load_bm25_retriever,
     load_chroma_retriever,
+    load_chroma_store,
 )
 
 load_dotenv()
@@ -84,11 +87,11 @@ def get_system_status() -> dict[str, bool]:
 @st.cache_resource(show_spinner=False)
 def load_resources() -> dict[str, Any]:
     """Load and cache heavy retrieval/reranking resources once."""
-    chroma_retriever = load_chroma_retriever(
+    chroma_store = load_chroma_store(
         persist_directory=DEFAULT_VECTOR_DB_DIR,
         embedding_provider="huggingface",
-        search_k=15,
     )
+    chroma_retriever = chroma_store.as_retriever(search_kwargs={"k": 15})
     bm25_retriever = load_bm25_retriever(
         bm25_documents_path=DEFAULT_BM25_DOCUMENTS_PATH,
         search_k=15,
@@ -98,6 +101,7 @@ def load_resources() -> dict[str, Any]:
         flashrank_model_name=DEFAULT_FLASHRANK_MODEL_NAME,
     )
     return {
+        "chroma_store": chroma_store,
         "chroma_retriever": chroma_retriever,
         "bm25_retriever": bm25_retriever,
         "cross_encoder": cross_encoder,
@@ -336,36 +340,52 @@ def main() -> None:
                 st.caption(f"🔍 Search query: *{search_query}*")
 
             try:
-                ensemble = build_ensemble_retriever(
-                    chroma_retriever=resources["chroma_retriever"],
-                    bm25_retriever=resources["bm25_retriever"],
-                    vector_weight=alpha,
-                    bm25_weight=1 - alpha,
-                )
+                is_synthesis = _looks_like_synthesis_query(search_query)
 
-                # Wrap with MultiQueryRetriever when enabled in the sidebar.
-                if use_multi_query:
-                    try:
-                        llm = build_llm(temperature=0.0)
-                        ensemble = build_multi_query_retriever(ensemble, llm=llm)
-                    except Exception:
-                        pass  # Graceful fallback to single-query.
+                if is_synthesis:
+                    # Per-document forced retrieval: top-2 chunks from each of
+                    # the 10 source documents, guaranteeing full corpus coverage.
+                    st.caption(
+                        "📚 Synthesis mode: retrieving from all source documents"
+                    )
+                    doc_names = _list_reference_documents()
+                    docs = get_per_document_chunks(
+                        question=search_query,
+                        chroma_store=resources["chroma_store"],
+                        doc_names=doc_names,
+                        top_k_per_doc=2,
+                    )
+                else:
+                    # Standard path: hybrid ensemble + optional reranker.
+                    ensemble = build_ensemble_retriever(
+                        chroma_retriever=resources["chroma_retriever"],
+                        bm25_retriever=resources["bm25_retriever"],
+                        vector_weight=alpha,
+                        bm25_weight=1 - alpha,
+                    )
 
-                retriever = build_rerank_retriever(
-                    base_retriever=ensemble,
-                    reranker_provider="flashrank" if use_reranker else "none",
-                    top_n=7,
-                    preloaded_compressor=resources["cross_encoder"] if use_reranker else None,
-                )
-                docs = retriever.invoke(search_query)[:7]
+                    if use_multi_query:
+                        try:
+                            llm = build_llm(temperature=0.0)
+                            ensemble = build_multi_query_retriever(ensemble, llm=llm)
+                        except Exception:
+                            pass
 
-                # Filter out low-relevance chunks when reranker is active.
-                if use_reranker and relevance_threshold > 0.0:
-                    filtered = [
-                        d for d in docs
-                        if d.metadata.get("relevance_score", 1.0) >= relevance_threshold
-                    ]
-                    docs = filtered if filtered else docs[:1]
+                    retriever = build_rerank_retriever(
+                        base_retriever=ensemble,
+                        reranker_provider="flashrank" if use_reranker else "none",
+                        top_n=7,
+                        preloaded_compressor=resources["cross_encoder"] if use_reranker else None,
+                    )
+                    docs = retriever.invoke(search_query)[:7]
+
+                    if use_reranker and relevance_threshold > 0.0:
+                        filtered = [
+                            d for d in docs
+                            if d.metadata.get("relevance_score", 1.0) >= relevance_threshold
+                        ]
+                        docs = filtered if filtered else docs[:1]
+
             except Exception as exc:
                 st.error(f"Retrieval failed: {exc}")
                 return

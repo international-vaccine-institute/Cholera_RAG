@@ -139,6 +139,28 @@ def build_multi_query_retriever(
     return MultiQueryRetriever.from_llm(retriever=base_retriever, llm=llm)  # type: ignore[arg-type]
 
 
+def load_chroma_store(
+    persist_directory: Path | str = DEFAULT_VECTOR_DB_DIR,
+    embedding_provider: Literal["openai", "huggingface"] = "huggingface",
+    embedding_model_name: str | None = None,
+    collection_name: str = "cholera_literature",
+) -> Chroma:
+    """Return the raw Chroma vector store (not wrapped as a retriever).
+
+    Use this when you need direct similarity_search with per-document filters,
+    e.g. for cross-document synthesis retrieval.
+    """
+    embeddings = get_embedding_model(
+        provider=embedding_provider,
+        model_name=embedding_model_name,
+    )
+    return Chroma(
+        collection_name=collection_name,
+        embedding_function=embeddings,
+        persist_directory=str(persist_directory),
+    )
+
+
 def load_chroma_retriever(
     persist_directory: Path | str = DEFAULT_VECTOR_DB_DIR,
     embedding_provider: Literal["openai", "huggingface"] = "huggingface",
@@ -147,16 +169,46 @@ def load_chroma_retriever(
     search_k: int = 20,
 ) -> BaseRetriever:
     """Load persisted Chroma collection and return a retriever."""
-    embeddings = get_embedding_model(
-        provider=embedding_provider,
-        model_name=embedding_model_name,
-    )
-    vector_store = Chroma(
+    vector_store = load_chroma_store(
+        persist_directory=persist_directory,
+        embedding_provider=embedding_provider,
+        embedding_model_name=embedding_model_name,
         collection_name=collection_name,
-        embedding_function=embeddings,
-        persist_directory=str(persist_directory),
     )
     return vector_store.as_retriever(search_kwargs={"k": search_k})
+
+
+def get_per_document_chunks(
+    question: str,
+    chroma_store: Chroma,
+    doc_names: list[str],
+    top_k_per_doc: int = 2,
+) -> list[Document]:
+    """Retrieve top_k_per_doc chunks from EACH source document independently.
+
+    Guarantees every document contributes at least one chunk to the context,
+    preventing synthesis questions from being answered using only 1-2 papers.
+    Duplicate content (same first 100 chars) is silently dropped.
+    """
+    all_chunks: list[Document] = []
+    seen: set[str] = set()
+
+    for doc_name in doc_names:
+        try:
+            chunks = chroma_store.similarity_search(
+                question,
+                k=top_k_per_doc,
+                filter={"filename": doc_name},
+            )
+        except Exception:
+            continue
+        for chunk in chunks:
+            key = chunk.page_content[:100]
+            if key not in seen:
+                seen.add(key)
+                all_chunks.append(chunk)
+
+    return all_chunks
 
 
 def load_bm25_retriever(
