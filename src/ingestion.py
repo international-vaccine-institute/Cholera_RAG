@@ -56,7 +56,7 @@ def load_pdf_documents(data_dir: Path | str = DEFAULT_DATA_DIR) -> list[Document
         mupdf_doc = fitz.open(str(pdf_path))
         mupdf_pages: list[str] = []
         for page in mupdf_doc:
-            mupdf_pages.append(page.get_text("text") or "")
+            mupdf_pages.append(str(page.get_text("text") or ""))
         mupdf_doc.close()
 
         # --- table structure via pdfplumber ---
@@ -99,13 +99,46 @@ def split_documents(
     chunk_size: int = CHUNK_SIZE,
     chunk_overlap: int = CHUNK_OVERLAP,
 ) -> list[Document]:
-    """Split loaded PDF pages into overlapping chunks."""
+    """Split loaded PDF pages into overlapping chunks.
+
+    Table blocks (marked with [TABLE]) are preserved intact as single chunks so
+    that row/column relationships are never broken across a chunk boundary.
+    """
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         add_start_index=True,
     )
-    return splitter.split_documents(documents)
+
+    result: list[Document] = []
+    for doc in documents:
+        if "[TABLE]" not in doc.page_content:
+            result.extend(splitter.split_documents([doc]))
+            continue
+
+        # Split at [TABLE] markers: first segment is body text, the rest are table blocks.
+        parts = doc.page_content.split("[TABLE]")
+
+        text_part = parts[0].strip()
+        if text_part:
+            text_doc = Document(
+                page_content=text_part,
+                metadata={**doc.metadata, "has_table": False},
+            )
+            result.extend(splitter.split_documents([text_doc]))
+
+        for table_text in parts[1:]:
+            cleaned = table_text.strip()
+            if not cleaned:
+                continue
+            result.append(
+                Document(
+                    page_content="[TABLE]\n" + cleaned,
+                    metadata={**doc.metadata, "has_table": True},
+                )
+            )
+
+    return result
 
 
 def get_embedding_model(
@@ -129,7 +162,7 @@ def get_embedding_model(
             from langchain_community.embeddings import HuggingFaceEmbeddings
 
         return HuggingFaceEmbeddings(
-            model_name=model_name or "sentence-transformers/all-MiniLM-L6-v2"
+            model_name=model_name or "BAAI/bge-large-en-v1.5"
         )
 
     raise ValueError(f"Unsupported embedding provider: {provider}")

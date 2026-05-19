@@ -10,7 +10,7 @@ from typing import Any
 import streamlit as st
 from dotenv import load_dotenv
 
-from src.generator import generate_answer, rewrite_query
+from src.generator import build_llm, generate_answer, rewrite_query
 from src.ingestion import (
     DEFAULT_BM25_DOCUMENTS_PATH,
     DEFAULT_DATA_DIR,
@@ -20,6 +20,7 @@ from src.ingestion import (
 from src.retriever import (
     DEFAULT_FLASHRANK_MODEL_NAME,
     build_ensemble_retriever,
+    build_multi_query_retriever,
     build_rerank_retriever,
     get_flashrank_reranker,
     load_bm25_retriever,
@@ -200,7 +201,7 @@ def _render_fragments(fragments: list[dict[str, str]]) -> None:
             )
 
 
-def _render_sidebar() -> tuple[float, bool]:
+def _render_sidebar() -> tuple[float, bool, float, bool]:
     status = get_system_status()
     references = _list_reference_documents()
 
@@ -242,6 +243,18 @@ def _render_sidebar() -> tuple[float, bool]:
         st.sidebar.caption("Disabled: faster retrieval-only mode")
         relevance_threshold = 0.0
 
+    st.sidebar.header("Multi-Query Retrieval")
+    use_multi_query = st.sidebar.toggle(
+        "Use multi-query retrieval",
+        value=False,
+        help="Generate 3 query variants and merge results. Improves recall for broad "
+             "synthesis questions (e.g. comparisons, overviews). Adds one extra LLM call.",
+    )
+    if use_multi_query:
+        st.sidebar.caption("Enabled: 3 query variants — merged + deduplicated results")
+    else:
+        st.sidebar.caption("Disabled: single-query mode (faster)")
+
     st.sidebar.header("Reference Documents")
     if references:
         for index, name in enumerate(references, start=1):
@@ -249,7 +262,7 @@ def _render_sidebar() -> tuple[float, bool]:
     else:
         st.sidebar.warning("No PDF files found in data/.")
 
-    return alpha, use_reranker, relevance_threshold
+    return alpha, use_reranker, relevance_threshold, use_multi_query
 
 
 def main() -> None:
@@ -257,7 +270,7 @@ def main() -> None:
     st.title("Ethiopia Cholera Response RAG System")
 
     _init_session_state()
-    alpha, use_reranker, relevance_threshold = _render_sidebar()
+    alpha, use_reranker, relevance_threshold, use_multi_query = _render_sidebar()
     status = get_system_status()
 
     if not _api_key_available():
@@ -329,6 +342,14 @@ def main() -> None:
                     vector_weight=alpha,
                     bm25_weight=1 - alpha,
                 )
+
+                # Wrap with MultiQueryRetriever when enabled in the sidebar.
+                if use_multi_query:
+                    try:
+                        llm = build_llm(temperature=0.0)
+                        ensemble = build_multi_query_retriever(ensemble, llm=llm)
+                    except Exception:
+                        pass  # Graceful fallback to single-query.
 
                 retriever = build_rerank_retriever(
                     base_retriever=ensemble,

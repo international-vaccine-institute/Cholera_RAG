@@ -40,6 +40,15 @@ DEFAULT_FLASHRANK_CACHE_DIR = PROJECT_ROOT / ".cache" / "flashrank"
 DEFAULT_FLASHRANK_MODEL_NAME = "ms-marco-MiniLM-L-12-v2"
 DEFAULT_RERANK_CANDIDATE_K = 15
 
+# Keywords that suggest the question requires synthesizing across multiple documents.
+import re as _re
+_SYNTHESIS_SIGNALS = _re.compile(
+    r"\b(compare|comparison|across|overall|all papers|summary|summarize|synthesize|"
+    r"between|difference|similar|trend|pattern|throughout|multiple|various|"
+    r"each study|every study|literature|review|overview)\b",
+    _re.IGNORECASE,
+)
+
 _RERANKER_CACHE: dict[tuple[str, int, str], object] = {}
 _HF_TOKEN_CONFIGURED = False
 
@@ -102,6 +111,32 @@ def _get_cohere_compressor(top_n: int) -> object:
     compressor = CohereRerank(top_n=top_n)
     _RERANKER_CACHE[cache_key] = compressor
     return compressor
+
+
+def _looks_like_synthesis_query(question: str) -> bool:
+    """Return True if the question likely requires evidence from multiple documents."""
+    return bool(_SYNTHESIS_SIGNALS.search(question))
+
+
+def build_multi_query_retriever(
+    base_retriever: BaseRetriever,
+    llm: object,
+) -> BaseRetriever:
+    """Wrap a retriever to generate multiple query variants for broader recall.
+
+    The LLM generates 3 alternative phrasings of the original question and
+    deduplicates the merged result set. Useful for synthesis questions that
+    need evidence spread across several documents.
+    """
+    try:
+        from langchain.retrievers.multi_query import MultiQueryRetriever
+    except ImportError:
+        try:
+            from langchain_community.retrievers import MultiQueryRetriever  # type: ignore
+        except ImportError:
+            return base_retriever
+
+    return MultiQueryRetriever.from_llm(retriever=base_retriever, llm=llm)  # type: ignore[arg-type]
 
 
 def load_chroma_retriever(
@@ -206,8 +241,15 @@ def get_top_reranked_chunks(
     flashrank_cache_dir: Path | str = DEFAULT_FLASHRANK_CACHE_DIR,
     flashrank_model_name: str = DEFAULT_FLASHRANK_MODEL_NAME,
     rerank_candidate_k: int = DEFAULT_RERANK_CANDIDATE_K,
+    use_multi_query: bool = False,
 ) -> list[Document]:
-    """Return top reranked chunks for a user question."""
+    """Return top reranked chunks for a user question.
+
+    When ``use_multi_query`` is True (or the question looks like a synthesis
+    query), the ensemble retriever is wrapped with MultiQueryRetriever so that
+    three alternative phrasings are searched and their results merged before
+    reranking. This significantly improves recall for broad questions.
+    """
     if reranker_provider == "none":
         candidate_k = max(top_k, 5)
     else:
@@ -230,6 +272,18 @@ def get_top_reranked_chunks(
         vector_weight=vector_weight,
         bm25_weight=bm25_weight,
     )
+
+    # Activate multi-query when explicitly requested or auto-detected as a synthesis question.
+    if use_multi_query or _looks_like_synthesis_query(question):
+        try:
+            try:
+                from .generator import build_llm
+            except ImportError:
+                from generator import build_llm  # type: ignore
+            llm = build_llm(temperature=0.0)
+            ensemble = build_multi_query_retriever(ensemble, llm=llm)
+        except Exception:
+            pass  # Gracefully fall back to single-query if anything fails.
 
     retriever = build_rerank_retriever(
         base_retriever=ensemble,

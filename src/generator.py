@@ -1,4 +1,4 @@
-"""Answer generation module using Gemini 3.1 Flash-Lite."""
+"""Answer generation module using Gemini 2.5 Flash."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 load_dotenv()
@@ -37,6 +37,14 @@ Follow these rules strictly:
    - whether the value is overall population or subgroup-specific.
 8) If table structure is ambiguous or headers are incomplete in the retrieved chunk, do not guess. State uncertainty and cite the source.
 9) The answer may require data from tables or sections listing numerical values. Carefully analyze not only narrative sentences but also any structured data sections before responding.
+10) Chain-of-Verification for Numbers: Before stating ANY numerical value (percentage, count,
+    rate, ratio), first quote the EXACT sentence or table cell from the context where you found
+    it, using this format:
+      > "...exact quote..." [Doc N]
+    Then state your interpretation on the next line. Apply this to every number in your answer.
+11) If you cannot locate a direct quote in the context that supports a specific number, do not
+    state that number. Instead write: "The context mentions [topic] but I cannot confirm the
+    exact figure."
 """.strip()
 
 
