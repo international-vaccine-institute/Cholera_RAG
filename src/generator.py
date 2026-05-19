@@ -45,7 +45,50 @@ Follow these rules strictly:
 11) If you cannot locate a direct quote in the context that supports a specific number, do not
     state that number. Instead write: "The context mentions [topic] but I cannot confirm the
     exact figure."
+12) When referring to a source in your prose, use the short title shown in the context header
+    (e.g., "the Retrospective Analysis study" or "the OCV review"), NOT generic labels like
+    "Document 1" or "Source 1". Reserve [Doc N] tags only for inline citations at the end of
+    your answer.
+13) When categorizing factors or findings across multiple categories (e.g., environmental vs.
+    behavioral risk factors), each item must appear in exactly ONE category — the most
+    appropriate one. Do not repeat the same item under multiple headings.
+14) Geographic context is mandatory for every cited result. For each numerical finding or
+    study conclusion, state the country, region, or city where the study was conducted
+    (e.g., "in a trial conducted in the Philippines", "from a field deployment in Odisha, India",
+    "reported for Ethiopia nationally"). Never present results from non-Ethiopian studies as if
+    they directly apply to Ethiopia unless the source paper explicitly states so.
+15) Distinguish vaccine efficacy from vaccine effectiveness. Efficacy figures come from
+    controlled trials (RCTs) under ideal conditions; effectiveness figures come from real-world
+    field deployments or observational studies. Label every cited VE figure with its study
+    design: write "efficacy (RCT)" or "effectiveness (field study)" immediately after the value.
+    Do not average, combine, or present efficacy and effectiveness figures under the same label.
 """.strip()
+
+
+_SYNTHESIS_RE = re.compile(
+    r"\b(compare|comparison|across|overall|all papers|summary|summarize|synthesize|"
+    r"between|difference|similar|trend|pattern|throughout|multiple|various|"
+    r"each study|every study|literature|review|overview|consistently|most|which papers|"
+    r"which documents|what are the|common|frequent)\b",
+    re.IGNORECASE,
+)
+
+SYNTHESIS_PROMPT_SUFFIX = """
+
+Additional instructions for this synthesis question:
+- For each factor or finding you list, specify the study context where it appears: include the
+  study type (e.g., retrospective analysis, RCT, review), location (region/city in Ethiopia),
+  and approximate year if available in the context.
+- Indicate whether a factor is mentioned by multiple papers or only one.
+- Each factor must appear under exactly one category — do not repeat the same factor across
+  multiple lists.
+- Prefer citing the actual short paper title (from the context header) over generic "Document N"
+  labels when referring to a source in prose.
+"""
+
+
+def _is_synthesis_query(question: str) -> bool:
+    return bool(_SYNTHESIS_RE.search(question))
 
 
 def get_gemini_api_key() -> str:
@@ -87,6 +130,18 @@ def build_llm(temperature: float = 0.0):
         "No LLM API key found. Set GEMINI_API_KEY (or GOOGLE_API_KEY), "
         "or set GROQ_API_KEY as fallback."
     )
+
+
+def _short_title(filename: str) -> str:
+    """Extract a brief human-readable label from a PDF filename for use in prose."""
+    name = filename
+    if name.lower().endswith(".pdf"):
+        name = name[:-4]
+    name = re.sub(r"^\([^)]+\)\s*", "", name)  # strip leading "(IVI)", "(WHO)", etc.
+    name = name.replace("_", " ").strip()
+    if len(name) > 60:
+        name = name[:60].rsplit(" ", 1)[0]
+    return name
 
 
 def _score_context_document(doc: Document, question: str) -> int:
@@ -139,25 +194,27 @@ def format_context(documents: Iterable[Document], question: str) -> str:
             next_idx += 1
         idx = seen[filename]
         sections.append(
-            f"[Document {idx}] Filename: {filename} | Page: {page}\n"
+            f"[Document {idx}] Short title: {_short_title(filename)} | Page: {page}\n"
             f"{doc.page_content.strip()}"
         )
     return "\n\n".join(sections)
 
 
-def build_gemini_chain(model_name: str = DEFAULT_GEMINI_MODEL):
+def build_gemini_chain(model_name: str = DEFAULT_GEMINI_MODEL, is_synthesis: bool = False):
     """Create LLM chat chain with a strict RAG prompt (Groq or Gemini)."""
     llm = build_llm(temperature=0.0)
+    human_message = (
+        "Question:\n{question}\n\n"
+        "Context:\n{context}\n\n"
+        "Please provide a concise and accurate answer in English.\n"
+        "At the end, cite only using [Doc N] tags (e.g., [Doc 1][Doc 2]). Do not write filenames."
+    )
+    if is_synthesis:
+        human_message += SYNTHESIS_PROMPT_SUFFIX
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system", SYSTEM_PROMPT),
-            (
-                "human",
-                "Question:\n{question}\n\n"
-                "Context:\n{context}\n\n"
-                "Please provide a concise and accurate answer in English.\n"
-                "At the end, cite only using [Doc N] tags (e.g., [Doc 1][Doc 2]). Do not write filenames.",
-            ),
+            ("human", human_message),
         ]
     )
     return prompt | llm
@@ -167,18 +224,21 @@ def invoke_with_google_genai_sdk(
     question: str,
     context: str,
     model_name: str = DEFAULT_GEMINI_MODEL,
+    is_synthesis: bool = False,
 ) -> str:
     """Fallback path for direct Google GenAI SDK calls."""
     from google import genai
 
     api_key = get_gemini_api_key()
     client = genai.Client(api_key=api_key)
+    human_suffix = SYNTHESIS_PROMPT_SUFFIX if is_synthesis else ""
     composed_prompt = (
         f"{SYSTEM_PROMPT}\n\n"
         f"Question:\n{question}\n\n"
         f"Context:\n{context}\n\n"
         "Please provide a concise and accurate answer in English.\n"
         "At the end, cite only using [Doc N] tags (e.g., [Doc 1][Doc 2]). Do not write filenames."
+        f"{human_suffix}"
     )
     response = client.models.generate_content(
         model=model_name,
@@ -297,9 +357,10 @@ def generate_answer(
 
     context = format_context(retrieved_docs, question=question)
     doc_map = _build_doc_map(retrieved_docs, question=question)
+    is_synthesis = _is_synthesis_query(question)
 
     try:
-        chain = build_gemini_chain(model_name=model_name)
+        chain = build_gemini_chain(model_name=model_name, is_synthesis=is_synthesis)
         response = chain.invoke({"question": question, "context": context})
         raw = response.content if hasattr(response, "content") else response
         if isinstance(raw, list):
@@ -314,6 +375,7 @@ def generate_answer(
             question=question,
             context=context,
             model_name=model_name,
+            is_synthesis=is_synthesis,
         )
 
     answer = _resolve_citations(answer, doc_map)
